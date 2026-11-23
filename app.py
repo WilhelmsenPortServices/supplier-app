@@ -8,7 +8,7 @@ from mailer import invite_content, send_mail, describe_sender
 st.set_page_config(page_title="Supplier Code of Conduct Tracker", page_icon="🧭", layout="wide")
 
 # Constants for Shared Mailbox & Microsoft Form Sign-Off URL
-SHARED_MAILBOX = "wps.supplier.Governance@wilhelmsen.com"
+SHARED_MAILBOX = "WPS.GLOBAL.COMPLIANCE@wilhelmsen.com"
 MS_SIGNOFF_FORM_URL = "https://forms.cloud.microsoft/Pages/ResponsePage.aspx?id=rScCXcw7BkGM8xbnNfO0xPhiTJZNiP5Em5O0TKXRRCxURFU3Q01aRjhZNDlOVlhFSzRZSjFDSjBVUS4u"
 
 # Hide Streamlit's built-in menu/header/footer for every viewer, on every page.
