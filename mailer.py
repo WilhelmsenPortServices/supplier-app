@@ -5,7 +5,7 @@ Secrets used (Streamlit -> Settings -> Secrets):
   SMTP_PORT   default 587  (587 = STARTTLS, 465 = SSL)
   SMTP_USER   Mailjet username / API key
   SMTP_PASS   Mailjet password / secret key
-  FROM_EMAIL  default "wps.supplier.governance@wilhelmsen.com" (must be an address Mailjet allows)
+  FROM_EMAIL  default "WPS.GLOBAL.COMPLIANCE@wilhelmsen.com" (must be an address Mailjet allows)
   FROM_NAME   default "WPS Supplier Governance"
   REPLY_TO    optional, replies go here (e.g. the shared mailbox) instead of the sending address
   SEND_DELAY_SECONDS  optional, pause between emails (default 0.5; use 2.5 for Microsoft 365 SMTP)
@@ -22,7 +22,7 @@ from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid
 
 SUBJECT = "Partnership Commitment – Complying with the Supplier Code of Conduct"
-DEFAULT_FROM = "wps.supplier.governance@wilhelmsen.com"
+DEFAULT_FROM = "WPS.GLOBAL.COMPLIANCE@wilhelmsen.com"
 
 
 def _secret(key, default=""):
