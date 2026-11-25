@@ -8,7 +8,7 @@ from mailer import invite_content, send_mail, describe_sender
 st.set_page_config(page_title="Supplier Code of Conduct Tracker", page_icon="🧭", layout="wide")
 
 # Constants for Shared Mailbox & Microsoft Form Sign-Off URL
-SHARED_MAILBOX = "WPS.GLOBAL.COMPLIANCE@wilhelmsen.com"
+SHARED_MAILBOX = "wps.global.compliance@wilhelmsen.com"
 MS_SIGNOFF_FORM_URL = "https://forms.cloud.microsoft/Pages/ResponsePage.aspx?id=rScCXcw7BkGM8xbnNfO0xPhiTJZNiP5Em5O0TKXRRCxURFU3Q01aRjhZNDlOVlhFSzRZSjFDSjBVUS4u"
 
 # Hide Streamlit's built-in menu/header/footer for every viewer, on every page.
@@ -52,17 +52,21 @@ if not st.session_state.get("ok"):
         st.error("Wrong password")
     st.stop()
 
-COLS = ["id", "company", "contact_name", "email", "token", "signed_off_at", "last_sent", "sends", "first_click", "thankyou_at"]
-SQL = """SELECT s.id,s.company,s.contact_name,s.email,s.token,s.signed_off_at,
- (SELECT MAX(sent_at) FROM sends WHERE supplier_id=s.id AND status='ok' AND (kind IS NULL OR kind!='thankyou')) last_sent,
- (SELECT COUNT(*) FROM sends WHERE supplier_id=s.id AND status='ok' AND (kind IS NULL OR kind!='thankyou')) sends,
- (SELECT MIN(ts) FROM events WHERE token=s.token AND type='click') first_click,
- (SELECT MAX(sent_at) FROM sends WHERE supplier_id=s.id AND status='ok' AND kind='thankyou') thankyou_at
- FROM suppliers s ORDER BY s.company"""
+COLS = ["id", "company", "country", "contact_name", "email", "token", "signed_off_at", "last_sent", "sends", "first_click", "thankyou_at"]
+SQL = """SELECT s.id,s.company,s.country,s.contact_name,s.email,s.token,s.signed_off_at,
+ ls.last_sent, COALESCE(ls.sends,0) sends, ev.first_click, ty.thankyou_at
+ FROM suppliers s
+ LEFT JOIN (SELECT supplier_id, MAX(sent_at) last_sent, COUNT(*) sends FROM sends
+            WHERE status='ok' AND (kind IS NULL OR kind!='thankyou') GROUP BY supplier_id) ls ON ls.supplier_id=s.id
+ LEFT JOIN (SELECT token, MIN(ts) first_click FROM events WHERE type='click' GROUP BY token) ev ON ev.token=s.token
+ LEFT JOIN (SELECT supplier_id, MAX(sent_at) thankyou_at FROM sends
+            WHERE status='ok' AND kind='thankyou' GROUP BY supplier_id) ty ON ty.supplier_id=s.id
+ ORDER BY s.company"""
 
 def load():
     df = pd.DataFrame(q(SQL), columns=COLS)
     df["sends"] = df["sends"].fillna(0).astype(int)
+    df["country"] = df["country"].apply(norm_country).replace("", "Unknown")
     def stat(r):
         if pd.notna(r.signed_off_at): return "Signed off"
         if pd.notna(r.first_click): return "Course started"
@@ -109,9 +113,18 @@ def read_table(up):
     d.columns = [str(c).strip() for c in d.columns]
     return d
 
+def norm_country(x):
+    """Tidies country names so 'india', 'INDIA ' and 'India' count as one country."""
+    t = "" if x is None or (isinstance(x, float) and pd.isna(x)) else re.sub(r"\s+", " ", str(x)).strip()
+    if t.lower() in ("", "nan", "none", "-"):
+        return ""
+    t = t.replace(".", "")
+    return t.upper() if (t.isalpha() and len(t) <= 3) else t.title()
+
 def map_supplier_cols(d):
-    """Finds the email, company and contact columns in an uploaded supplier list, whatever the headings are called."""
+    """Finds the email, company, contact and country columns in an uploaded supplier list, whatever the headings are called."""
     low = {c: str(c).strip().lower() for c in d.columns}
+    comp_words = ("company", "supplier", "vendor", "organi", "firm")
     em = next((c for c, l in low.items() if "mail" in l), None)
     if em is None:  # no heading with "mail": use the column that holds the most @ signs
         best, em = 0, None
@@ -119,9 +132,10 @@ def map_supplier_cols(d):
             n = int(d[c].astype(str).str.contains("@").sum())
             if n > best:
                 best, em = n, c
-    co = next((c for c, l in low.items() if c != em and any(k in l for k in ("company", "supplier", "vendor", "organi", "firm"))), None)
-    nm = next((c for c, l in low.items() if c not in (em, co) and any(k in l for k in ("contact", "person", "name"))), None)
-    return em, co, nm
+    ct = next((c for c, l in low.items() if c != em and any(k in l for k in ("country", "region", "nation")) and not any(k in l for k in comp_words)), None)
+    co = next((c for c, l in low.items() if c not in (em, ct) and any(k in l for k in comp_words)), None)
+    nm = next((c for c, l in low.items() if c not in (em, ct, co) and any(k in l for k in ("contact", "person", "name"))), None)
+    return em, co, nm, ct
 
 def cell(r, col):
     return "" if col is None or pd.isna(r[col]) else str(r[col]).strip()
@@ -129,23 +143,24 @@ def cell(r, col):
 def supplier_template_bytes():
     buf = io.BytesIO()
     sample = pd.DataFrame({
+        "country": ["India", "UAE", ""],
         "company": ["Example Shipping Pvt Ltd", "Sample Logistics LLC", ""],
         "contact_name": ["Asha Rao", "John Smith", ""],
         "email": ["asha.rao@example.com", "john.smith@example.com", ""],
     })
     howto = pd.DataFrame({"How to fill this sheet": [
-        "1. Keep the three headings in row 1 of the 'Suppliers' sheet: company, contact_name, email.",
-        "2. One supplier contact per row. Email is the only column that must be filled.",
+        "1. Keep the headings in row 1 of the 'Suppliers' sheet: country, company, contact_name, email.",
+        "2. One supplier contact per row. Email is the only column that must be filled. Country is used for the country-wise dashboard.",
         "3. Delete the example rows, then paste your own list.",
         "4. Save as .xlsx (or .csv) and upload it on the Suppliers page.",
-        "5. People already in the app are skipped, so you can upload the same list again safely.",
+        "5. People already in the app are skipped (but a blank country or company is filled in), so you can upload the same list again safely.",
     ]})
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         sample.to_excel(xw, sheet_name="Suppliers", index=False)
         howto.to_excel(xw, sheet_name="How to fill", index=False)
-        for ws, widths in ((xw.sheets["Suppliers"], (34, 24, 36)), (xw.sheets["How to fill"], (100,))):
+        for ws, widths in ((xw.sheets["Suppliers"], (16, 34, 24, 36)), (xw.sheets["How to fill"], (120,))):
             for i, w in enumerate(widths):
-                ws.column_dimensions["ABC"[i]].width = w
+                ws.column_dimensions["ABCD"[i]].width = w
     return buf.getvalue()
 
 def pick_email_col(d):
@@ -180,6 +195,11 @@ if st.sidebar.button("Refresh"): st.rerun()
 df = load()
 
 if page == "Dashboard":
+    df_all = df
+    if len(df_all) and df_all.country.nunique() > 1:
+        sel_c = st.selectbox("Country", ["All countries"] + sorted(df_all.country.unique()))
+        if sel_c != "All countries":
+            df = df_all[df_all.country == sel_c].reset_index(drop=True)
     n = len(df)
     sent = int((df.sends > 0).sum()) if n else 0
     started = int((df.first_click.notna() | df.signed_off_at.notna()).sum()) if n else 0
@@ -198,6 +218,22 @@ if page == "Dashboard":
     if n:
         st.progress(done / n, text=f"Sign-off completion: {done / n:.0%} ({done}/{n} signed off)")
     st.caption("Course started = the supplier entered their email on the start page and pressed Start. Signed off = the supplier submitted the sign-off page at the end of the course.")
+    if len(df_all):
+        st.subheader("Country-wise progress")
+        tt = df_all.assign(_e=(df_all.sends > 0).astype(int),
+                           _s=(df_all.first_click.notna() | df_all.signed_off_at.notna()).astype(int),
+                           _d=df_all.signed_off_at.notna().astype(int))
+        cw = tt.groupby("country").agg(Suppliers=("id", "size"), Emailed=("_e", "sum"), **{"Course started": ("_s", "sum")}, **{"Signed off": ("_d", "sum")})
+        cw["% signed off"] = (cw["Signed off"] * 100 / cw["Suppliers"]).round(0).astype(int)
+        tot = pd.DataFrame([{"Suppliers": int(cw["Suppliers"].sum()), "Emailed": int(cw["Emailed"].sum()),
+                             "Course started": int(cw["Course started"].sum()), "Signed off": int(cw["Signed off"].sum()),
+                             "% signed off": int(round(cw["Signed off"].sum() * 100 / max(cw["Suppliers"].sum(), 1)))}], index=["Total"])
+        cw_show = pd.concat([cw, tot]).rename_axis("Country").reset_index()
+        st.dataframe(cw_show, use_container_width=True, hide_index=True)
+        if len(cw) > 1:
+            st.bar_chart(pd.DataFrame({"Signed off": cw["Signed off"],
+                                       "Started, not signed off": cw["Course started"] - cw["Signed off"],
+                                       "Not started yet": cw["Suppliers"] - cw["Course started"]}))
     if n:
         f1, f2 = st.columns([2, 1])
         stat_f = f1.multiselect("Status", ["Not sent", "Sent", "Course started", "Signed off"])
@@ -206,6 +242,7 @@ if page == "Dashboard":
         if stat_f: v = v[v.status.isin(stat_f)]
         if txt: v = v[v.company.str.contains(txt, case=False, na=False) | v.email.str.contains(txt, case=False, na=False)]
         out = pd.DataFrame({
+            "Country": v.country,
             "Company": v.company,
             "Contact": v.contact_name,
             "Email": v.email,
@@ -224,6 +261,7 @@ if page == "Dashboard":
 
         def tidy(d):
             return pd.DataFrame({
+                "Country": d.country,
                 "Company": d.company,
                 "Contact": d.contact_name,
                 "Email": d.email,
@@ -239,7 +277,9 @@ if page == "Dashboard":
             tidy(df[df.status == "Signed off"]).to_excel(xw, sheet_name="Signed off", index=False)
             tidy(df[df.status == "Course started"]).to_excel(xw, sheet_name="Started, not signed off", index=False)
             tidy(df[df.status == "Sent"]).to_excel(xw, sheet_name="Sent, not started", index=False)
-        st.download_button("Download Excel report (4 sheets)", buf.getvalue(), "supplier_report.xlsx",
+            if len(df_all):
+                cw_show.to_excel(xw, sheet_name="By country", index=False)
+        st.download_button("Download Excel report", buf.getvalue(), "supplier_report.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.subheader("Recent activity")
         ev = pd.DataFrame(q("SELECT s.company,s.email,COUNT(*) clicks,MAX(e.ts) ts FROM events e JOIN suppliers s ON s.token=e.token WHERE e.type='click' GROUP BY s.id ORDER BY MAX(e.ts) DESC LIMIT 25"),
@@ -261,10 +301,10 @@ if page == "Dashboard":
         if len(uv):
             uv["first_ts"], uv["last_ts"] = ist(uv["first_ts"]), ist(uv["last_ts"])
             uv.columns = ["Email", "Times started", "First started", "Latest start"]
-            st.write("Tick the people you recognise, add their company, then add them to your supplier list. Their start time is kept.")
+            st.write("Tick the people you recognise, add their country and company, then add them to your supplier list. Their start time is kept.")
             ed = uv.copy()
             ed.insert(0, "Select", False)
-            ed["Company"], ed["Contact name"] = "", ""
+            ed["Country"], ed["Company"], ed["Contact name"] = "", "", ""
             with st.form("uv_form"):
                 edited = st.data_editor(ed, hide_index=True, use_container_width=True, key="uv_editor",
                                         disabled=["Email", "Times started", "First started", "Latest start"])
@@ -280,7 +320,8 @@ if page == "Dashboard":
                     if add_go:
                         co = "" if pd.isna(r["Company"]) else str(r["Company"])
                         nm = "" if pd.isna(r["Contact name"]) else str(r["Contact name"])
-                        q("INSERT OR IGNORE INTO suppliers(company,contact_name,email,token) VALUES(?,?,?,?)", [co, nm, em, secrets.token_urlsafe(8)])
+                        ctr = norm_country(r["Country"])
+                        q("INSERT OR IGNORE INTO suppliers(company,country,contact_name,email,token) VALUES(?,?,?,?,?)", [co, ctr, nm, em, secrets.token_urlsafe(8)])
                         tok = q("SELECT token FROM suppliers WHERE LOWER(email)=?", [em])[0]["token"]
                         q("INSERT INTO events(token,type,ua,ts) SELECT ?,'click',ua,ts FROM visitors WHERE email=? AND handled IS NULL", [tok, em])
                         q("UPDATE visitors SET handled='added' WHERE email=? AND handled IS NULL", [em])
@@ -322,22 +363,22 @@ elif page == "Suppliers":
     with tab_add:
         st.download_button("Download blank Excel template", supplier_template_bytes(), "supplier_upload_template.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        up = st.file_uploader("Upload your supplier list (Excel or CSV). Headings with company, contact and email in them are understood.", type=["xlsx", "csv"])
+        up = st.file_uploader("Upload your supplier list (Excel or CSV). Headings with country, company, contact and email in them are understood.", type=["xlsx", "csv"])
         if up:
-            d, em_c, co_c, nm_c = None, None, None, None
+            d, em_c, co_c, nm_c, ct_c = None, None, None, None, None
             try:
                 d = read_table(up)
                 if any(re.search(EMAIL_RE, str(c)) for c in d.columns):  # file has no heading row: the first "heading" is really a supplier
                     first = list(d.columns)
                     d.columns = [f"column {i + 1}" for i in range(len(first))]
                     d = pd.concat([pd.DataFrame([first], columns=d.columns), d], ignore_index=True)
-                em_c, co_c, nm_c = map_supplier_cols(d)
+                em_c, co_c, nm_c, ct_c = map_supplier_cols(d)
             except Exception as e:
                 st.error(f"Could not read this file: {e}")
             if d is not None and em_c is None:
                 st.error("I could not find an email column. Please use the template, or name the column 'email'.")
             elif d is not None:
-                st.caption(f"Columns used: Email = '{em_c}', Company = '{co_c}', Contact = '{nm_c}'. First rows of your file:")
+                st.caption(f"Columns used: Email = '{em_c}', Company = '{co_c}', Contact = '{nm_c}', Country = '{ct_c}'. First rows of your file:")
                 st.dataframe(d.head(5), use_container_width=True, hide_index=True)
                 if st.button("Import these suppliers"):
                     known = {str(x).strip().lower() for x in df.email}
@@ -350,28 +391,32 @@ elif page == "Suppliers":
                         em = m_.group(0).strip().lower()
                         if em in known:
                             existing += 1
+                            q("UPDATE suppliers SET country=COALESCE(NULLIF(country,''),?), company=COALESCE(NULLIF(company,''),?), contact_name=COALESCE(NULLIF(contact_name,''),?) WHERE LOWER(TRIM(email))=?",
+                              [norm_country(cell(r, ct_c)), cell(r, co_c), cell(r, nm_c), em])
                             continue
-                        q("INSERT OR IGNORE INTO suppliers(company,contact_name,email,token) VALUES(?,?,?,?)",
-                          [cell(r, co_c), cell(r, nm_c), em, secrets.token_urlsafe(8)])
+                        q("INSERT OR IGNORE INTO suppliers(company,country,contact_name,email,token) VALUES(?,?,?,?,?)",
+                          [cell(r, co_c), norm_country(cell(r, ct_c)), cell(r, nm_c), em, secrets.token_urlsafe(8)])
                         known.add(em)
                         new += 1
                     log("Suppliers imported from file", f"{new} new, {existing} already in list, {invalid} without valid email")
-                    st.session_state["flash"] = f"Added {new} new supplier(s). {existing} were already in the list and {invalid} row(s) had no valid email."
+                    st.session_state["flash"] = f"Added {new} new supplier(s). {existing} were already in the list (blank country, company or contact filled in from the file) and {invalid} row(s) had no valid email."
                     st.rerun()
         pasted = st.text_area("Or paste emails (from Outlook or Excel; any separator)", height=110)
-        paste_co = st.text_input("Company for these emails (optional)")
+        pc1, pc2 = st.columns(2)
+        paste_co = pc1.text_input("Company for these emails (optional)")
+        paste_ct = pc2.text_input("Country for these emails (optional)")
         if st.button("Add pasted emails") and pasted.strip():
             found = list(dict.fromkeys(e.lower() for e in re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", pasted)))
             for em in found:
-                q("INSERT OR IGNORE INTO suppliers(company,contact_name,email,token) VALUES(?,?,?,?)", [paste_co, "", em, secrets.token_urlsafe(8)])
+                q("INSERT OR IGNORE INTO suppliers(company,country,contact_name,email,token) VALUES(?,?,?,?,?)", [paste_co, norm_country(paste_ct), "", em, secrets.token_urlsafe(8)])
             st.success(f"Found {len(found)} email(s). Anyone already in the list is skipped.")
             time.sleep(1)
             st.rerun()
         with st.form("add"):
-            c1, c2, c3 = st.columns(3)
-            co, nm, em = c1.text_input("Company"), c2.text_input("Contact name"), c3.text_input("Email")
+            c0, c1, c2, c3 = st.columns(4)
+            ct, co, nm, em = c0.text_input("Country"), c1.text_input("Company"), c2.text_input("Contact name"), c3.text_input("Email")
             if st.form_submit_button("Add supplier") and "@" in em:
-                q("INSERT OR IGNORE INTO suppliers(company,contact_name,email,token) VALUES(?,?,?,?)", [co, nm, em.strip().lower(), secrets.token_urlsafe(8)])
+                q("INSERT OR IGNORE INTO suppliers(company,country,contact_name,email,token) VALUES(?,?,?,?,?)", [co, norm_country(ct), nm, em.strip().lower(), secrets.token_urlsafe(8)])
                 st.rerun()
     with tab_del:
         if len(df):
@@ -395,7 +440,7 @@ elif page == "Suppliers":
         else:
             st.info("There are no suppliers to delete.")
     st.subheader("All suppliers")
-    st.dataframe(df[["company", "contact_name", "email", "status"]], use_container_width=True, hide_index=True)
+    st.dataframe(df[["country", "company", "contact_name", "email", "status"]], use_container_width=True, hide_index=True)
     with st.expander("Change log: who was added, discarded or deleted"):
         lg = pd.DataFrame(q("SELECT ts,action,detail FROM log ORDER BY id DESC LIMIT 100"), columns=["ts", "action", "detail"])
         if len(lg):
@@ -429,6 +474,11 @@ elif page == "Send & Follow-up":
         last = pd.to_datetime(t.last_sent)
         t = t[last.isna() | (last < cutoff)]
 
+    countries_all = sorted(df.country.unique())
+    if len(countries_all) > 1:
+        pick_c = st.multiselect("Country (leave empty for all countries)", countries_all)
+        if pick_c:
+            t = t[t.country.isin(pick_c)]
     batch_size = st.number_input("Batch size (suppliers per Outlook email)", 1, 500, 100)
     eligible = t.email.tolist()
     picks = st.multiselect(f"Recipients ({len(eligible)} eligible)", eligible, default=eligible[:int(batch_size)])
@@ -511,7 +561,7 @@ elif page == "Send & Follow-up":
 else:
     st.title("Sign-offs")
     st.write("Suppliers sign off by themselves on the sign-off page at the end of the course, and it appears on the Dashboard automatically. Use this page only to fix something.")
-    tab_manual, tab_fix = st.tabs(["Record a sign-off manually", "Remove a sign-off"])
+    tab_manual, tab_bulk, tab_fix = st.tabs(["Record a sign-off manually", "Record several at once", "Remove a sign-off"])
     with tab_manual:
         st.subheader("Record Sign-Off Directly in the App")
         st.write("Mark an existing supplier as signed off, or enter a new supplier's sign-off directly.")
@@ -547,6 +597,27 @@ else:
             st.success(f"Marked {m} as signed off.")
             time.sleep(1)
             st.rerun()
+    with tab_bulk:
+        st.write("For suppliers who confirmed outside the sign-off page, for example by replying to your email or by a form. Paste their emails and they are marked as signed off now. Keep the replies or form responses as your evidence.")
+        bulk_txt = st.text_area("Emails (from Outlook or Excel; any separator)", height=140, key="bulk_emails")
+        bulk_note = st.text_input("Note for the record (for example: China, email reply)", key="bulk_note")
+        if st.button("Mark these as signed off", disabled=not bulk_txt.strip()):
+            found = list(dict.fromkeys(e.lower() for e in re.findall(EMAIL_RE, bulk_txt)))
+            known_set = {str(x).strip().lower() for x in df.email}
+            hit = [e for e in found if e in known_set]
+            miss = [e for e in found if e not in known_set]
+            for em_ in hit:
+                q("UPDATE suppliers SET signed_off_at=COALESCE(signed_off_at, CURRENT_TIMESTAMP) WHERE LOWER(TRIM(email))=?", [em_])
+            if hit:
+                log("Bulk sign-off recorded", f"{len(hit)} supplier(s) | {bulk_note or 'no note'}")
+            st.session_state["bulk_result"] = (len(hit), miss)
+            st.rerun()
+        res = st.session_state.pop("bulk_result", None)
+        if res:
+            st.success(f"Marked {res[0]} supplier(s) as signed off.")
+            if res[1]:
+                st.warning("These emails are not in your supplier list, so nothing was recorded for them (add them on the Suppliers page first): " + ", ".join(res[1][:20]))
+
     with tab_fix:
         signed = df[df.signed_off_at.notna()]
         if len(signed):
